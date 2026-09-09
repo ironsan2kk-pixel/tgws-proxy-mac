@@ -16,3 +16,6 @@ rewrite/
 # Логи и локальные конфиги
 core.log
 *.log
+
+# Корневой архив (дублируется в release/)
+TGWSProxyMac.app.zip
