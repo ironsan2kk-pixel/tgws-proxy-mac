@@ -136,7 +136,26 @@ public final class SocksSession: NSObject, @unchecked Sendable {
     }
 
     /// Кэш: лучший WS-домен для каждого DC (значение — сначала успешные).
-    static var wsDomainPrefs: [Int: [String]] = [:]
+    /// Потокобезопасный (мутируется из множества потоков сессий + пула).
+    static let wsDomainPrefs = WsDomainCache()
+
+    /// Потокобезопасный словарь [dc → предпочтительные домены].
+    final class WsDomainCache {
+        private let lock = NSLock()
+        private var storage: [Int: [String]] = [:]
+
+        func prefs(_ dc: Int) -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage[dc] ?? []
+        }
+
+        func update(_ dc: Int, _ domains: [String], successDomain: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            storage[dc] = [successDomain] + domains.filter { $0 != successDomain }
+        }
+    }
 
     init(fd: Int32) { self.fd = fd }
 
@@ -334,9 +353,37 @@ public final class SocksSession: NSObject, @unchecked Sendable {
     }
 
     private func tryConnectWS(dc: Int, domains: [String]) -> WSClient? {
-        guard let targetIp = TelegramDC.defaultDcIPs[dc] else { return nil }
+        // 1) Готовое соединение из пула (релей может отказать на новом connect)
+        if let pooled = WsPool.shared.acquire(dc, false) {
+            CoreLog.write("ws-connect: POOL hit dc\(dc) (забираю предоткрытое)")
+            return pooled
+        }
+        // 2) Коулдаун для DC, которые недавно не поднимали WS: 30с пропускаем
+        //    попытки WS и уходим прямо в TCP fallback (экономим десятки секунд
+        //    на DC1/3/5, где релей вообще недоступен).
+        let key = "\(dc)|mfalse"
+        if WsPool.shared.cooldownActive(key) {
+            CoreLog.write("ws-connect: cooldown dc\(dc) (пропуск WS на 30с)")
+            return nil
+        }
+        let ws = SocksSession.openBestWS(dc: dc, isMedia: false, targetIp: TelegramDC.defaultDcIPs[dc] ?? "", domains: domains)
+        if let ws = ws {
+            CoreLog.write("ws-connect: OK dc\(dc) via пул/домены")
+            // Держим запас: фоново открываем ещё одно соединение в пул
+            WsPool.shared.scheduleRefill(dc, false)
+            return ws
+        }
+        // Все попытки провалились — вводим коулдаун 30с, чтобы не долбить релей
+        WsPool.shared.markCooldown(key)
+        return nil
+    }
+
+    /// Открывает WS перебором доменов (1-2 круга, кэш успешного, 6с таймаут).
+    /// Общий фоновый путь для сессий и пула.
+    static func openBestWS(dc: Int, isMedia: Bool, targetIp: String, domains: [String]) -> WSClient? {
+        guard !targetIp.isEmpty else { return nil }
         // Более предпочтительные домены, успешно проверенные в предыдущих сессиях
-        let prefs = SocksSession.wsDomainPrefs[dc] ?? []
+        let prefs = SocksSession.wsDomainPrefs.prefs(dc)
         var ordered = prefs + domains.filter { !prefs.contains($0) }
         // До 2 полных кругов по доменам — релей при пике (много параллельных
         // сессий TG) может не принять первый connect, второй проходит.
@@ -349,7 +396,7 @@ public final class SocksSession: NSObject, @unchecked Sendable {
                 do {
                     let ws = try WSClient(ip: targetIp, domain: domain, timeout: 6.0)
                     CoreLog.write("ws-connect: OK dc\(dc) via \(domain)")
-                    SocksSession.wsDomainPrefs[dc] = [domain] + (SocksSession.wsDomainPrefs[dc] ?? []).filter { $0 != domain }
+                    SocksSession.wsDomainPrefs.update(dc, ordered, successDomain: domain)
                     return ws
                 } catch let e as WsHandshakeError {
                     SocksSession.statLock.lock()
@@ -442,7 +489,7 @@ public final class SocksSession: NSObject, @unchecked Sendable {
         close(out)
     }
 
-    private func openTcp(dst: String, port: Int) -> Int32? {
+    private func openTcp(dst: String, port: Int, timeout: TimeInterval = 8.0) -> Int32? {
         var host = inet_addr(dst)
         if host == INADDR_NONE {
             guard let resolved = resolveHost(dst) else { return nil }
@@ -452,6 +499,10 @@ public final class SocksSession: NSObject, @unchecked Sendable {
         guard out >= 0 else { return nil }
         var opt: Int32 = 1
         setsockopt(out, IPPROTO_TCP, TCP_NODELAY, &opt, socklen_t(MemoryLayout<Int32>.size))
+        // Неблокирующий режим — иначе connect() к недоступному IP зависает
+        // на минуты в SYN-ретраях и держит поток сессии (и FD) призраком.
+        let oldFlags = fcntl(out, F_GETFL, 0)
+        fcntl(out, F_SETFL, oldFlags | O_NONBLOCK)
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(port).bigEndian
@@ -461,10 +512,43 @@ public final class SocksSession: NSObject, @unchecked Sendable {
                 connect(out, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard res == 0 else {
+        if res != 0 && errno != EINPROGRESS {
             close(out)
             return nil
         }
+        // Ждём готовности сокета (поллинг с таймаутом)
+        var pfd = pollfd(fd: out, events: Int16(POLLOUT), revents: 0)
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            let remain = deadline.timeIntervalSinceNow
+            if remain <= 0 {
+                close(out)
+                return nil
+            }
+            let pr = poll(&pfd, 1, Int32(remain * 1000))
+            if pr > 0 {
+                if pfd.revents & Int16(POLLERR) != 0 || pfd.revents & Int16(POLLHUP) != 0 {
+                    close(out)
+                    return nil
+                }
+                var soerr: Int32 = 0
+                var len = socklen_t(MemoryLayout<Int32>.size)
+                getsockopt(out, SOL_SOCKET, SO_ERROR, &soerr, &len)
+                if soerr != 0 {
+                    close(out)
+                    return nil
+                }
+                break
+            }
+            if pr == 0 { continue }
+            // poll вернул -1 (ошибка), если EINTR — продолжаем
+            if errno != EINTR {
+                close(out)
+                return nil
+            }
+        }
+        // Возвращаем блокирующий режим для последующего pipe/read
+        fcntl(out, F_SETFL, oldFlags & ~O_NONBLOCK)
         return out
     }
 
@@ -477,12 +561,19 @@ public final class SocksSession: NSObject, @unchecked Sendable {
         return ip
     }
 
-    private func writeFd(_ f: Int32, _ data: [UInt8]) -> Bool {
+    private func writeFd(_ f: Int32, _ data: [UInt8], timeout: TimeInterval = 8.0) -> Bool {
         var i = 0
+        let deadline = Date().addingTimeInterval(timeout)
         while i < data.count {
+            let remain = deadline.timeIntervalSinceNow
+            if remain <= 0 { return false }
             let r = write(f, Array(data[i...]), data.count - i)
             if r < 0 {
                 if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    usleep(50_000)
+                    continue
+                }
                 return false
             }
             i += r
