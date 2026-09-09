@@ -1,0 +1,18 @@
+# Сборки и артефакты
+.build/
+tgws-test
+TGWSProxyMac.app/
+*.o
+*.swp
+
+# macOS
+.DS_Store
+
+# Сторонние исходники для сверки протокола (не являются частью проекта)
+flowseal/
+ihtfw/
+rewrite/
+
+# Логи и локальные конфиги
+core.log
+*.log
