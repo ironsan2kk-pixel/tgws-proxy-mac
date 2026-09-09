@@ -332,7 +332,10 @@ public final class SocksSession: NSObject, @unchecked Sendable {
         var ordered = prefs + domains.filter { !prefs.contains($0) }
         // До 2 полных кругов по доменам — релей при пике (много параллельных
         // сессий TG) может не принять первый connect, второй проходит.
+        // Если первый круг завершился только глухими таймаутами (релей вообще
+        // недоступен), второй круг бесполезен — экономим 6с на подключении.
         for attempt in 1...2 {
+            var sawHardTimeout = false
             for domain in ordered {
                 CoreLog.write("ws-connect(\(attempt)): try dc\(dc) ip=\(targetIp) domain=\(domain)")
                 do {
@@ -346,6 +349,8 @@ public final class SocksSession: NSObject, @unchecked Sendable {
                     SocksSession.statLock.unlock()
                     CoreLog.write("ws-connect: handshake err dc\(dc) \(domain): HTTP \(e.statusCode) \(e.statusLine) loc=\(e.location ?? "-")")
                     if e.isRedirect { continue }
+                    // connect timeout — релей не отвечает; второй круг не поможет
+                    if e.statusCode == 0 && e.statusLine == "connect timeout" { sawHardTimeout = true }
                 } catch {
                     SocksSession.statLock.lock()
                     SocksSession.wsErrors += 1
@@ -354,6 +359,7 @@ public final class SocksSession: NSObject, @unchecked Sendable {
                     continue
                 }
             }
+            if sawHardTimeout { break }
         }
         return nil
     }
