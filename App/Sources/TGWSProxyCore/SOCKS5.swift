@@ -334,7 +334,7 @@ public final class SocksSession: NSObject, @unchecked Sendable {
 
         // --- try WS ---
         var ws: WSClient? = nil
-        ws = tryConnectWS(dc: dc, domains: domains)
+        ws = tryConnectWS(dc: dc, isMedia: isMedia, domains: domains)
         if ws == nil {
             SocksSession.statLock.lock()
             SocksSession.tcpFallbacks += 1
@@ -352,25 +352,26 @@ public final class SocksSession: NSObject, @unchecked Sendable {
         bridgeWS(ws: ws!, initData: initPkt, initPatched: initPatched)
     }
 
-    private func tryConnectWS(dc: Int, domains: [String]) -> WSClient? {
-        // 1) Готовое соединение из пула (релей может отказать на новом connect)
-        if let pooled = WsPool.shared.acquire(dc, false) {
-            CoreLog.write("ws-connect: POOL hit dc\(dc) (забираю предоткрытое)")
+    private func tryConnectWS(dc: Int, isMedia: Bool, domains: [String]) -> WSClient? {
+        // 1) Готовое соединение из пула (релей может отказать на новом connect).
+        //    Ключ пула — (dc, isMedia), как в Flowseal _WsPool.get(dc, is_media).
+        if let pooled = WsPool.shared.acquire(dc, isMedia) {
+            CoreLog.write("ws-connect: POOL hit dc\(dc)\(isMedia ? " media" : "") (забираю предоткрытое)")
             return pooled
         }
         // 2) Коулдаун для DC, которые недавно не поднимали WS: 30с пропускаем
         //    попытки WS и уходим прямо в TCP fallback (экономим десятки секунд
         //    на DC1/3/5, где релей вообще недоступен).
-        let key = "\(dc)|mfalse"
+        let key = "\(dc)|m\(isMedia)"
         if WsPool.shared.cooldownActive(key) {
-            CoreLog.write("ws-connect: cooldown dc\(dc) (пропуск WS на 30с)")
+            CoreLog.write("ws-connect: cooldown dc\(dc)\(isMedia ? " media" : "") (пропуск WS на 30с)")
             return nil
         }
-        let ws = SocksSession.openBestWS(dc: dc, isMedia: false, targetIp: TelegramDC.defaultDcIPs[dc] ?? "", domains: domains)
+        let ws = SocksSession.openBestWS(dc: dc, isMedia: isMedia, targetIp: TelegramDC.defaultDcIPs[dc] ?? "", domains: domains)
         if let ws = ws {
-            CoreLog.write("ws-connect: OK dc\(dc) via пул/домены")
+            CoreLog.write("ws-connect: OK dc\(dc)\(isMedia ? " media" : "") via пул/домены")
             // Держим запас: фоново открываем ещё одно соединение в пул
-            WsPool.shared.scheduleRefill(dc, false)
+            WsPool.shared.scheduleRefill(dc, isMedia)
             return ws
         }
         // Все попытки провалились. Коулдаун только для DC без WS-релея (1/3/5):
