@@ -41,7 +41,7 @@ final class WsPool {
         return false
     }
 
-    static let poolSize = 2        // запас на (dc, media)
+    static let poolSize = 3        // запас на (dc, media)
     static let maxAge = 120.0      // сек, затем ротация
     static let minAge = 5.0        // не выдавать свежесозданные (иначе нет смысла пула)
 

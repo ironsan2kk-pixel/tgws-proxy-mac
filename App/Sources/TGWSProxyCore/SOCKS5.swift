@@ -373,15 +373,24 @@ public final class SocksSession: NSObject, @unchecked Sendable {
             WsPool.shared.scheduleRefill(dc, false)
             return ws
         }
-        // Все попытки провалились — вводим коулдаун 30с, чтобы не долбить релей
-        WsPool.shared.markCooldown(key)
+        // Все попытки провалились. Коулдаун только для DC без WS-релея (1/3/5):
+        // рабочие DC2/4 лечатся пулом и повторной попыткой, а не простоем.
+        if dc == 1 || dc == 3 || dc == 5 {
+            WsPool.shared.markCooldown(key)
+        }
         return nil
     }
 
     /// Открывает WS перебором доменов (1-2 круга, кэш успешного, 6с таймаут).
-    /// Общий фоновый путь для сессий и пула.
+    /// Общий фоновый путь для сессий и пула. Уважает коулдаун: если релей для
+    /// DC не отвечал последние 30с — не тратим время (и пул не долбит DC1/3/5).
     static func openBestWS(dc: Int, isMedia: Bool, targetIp: String, domains: [String]) -> WSClient? {
         guard !targetIp.isEmpty else { return nil }
+        let key = "\(dc)|m\(isMedia)"
+        if WsPool.shared.cooldownActive(key) {
+            CoreLog.write("ws-connect: cooldown dc\(dc) (пропуск WS на 30с)")
+            return nil
+        }
         // Более предпочтительные домены, успешно проверенные в предыдущих сессиях
         let prefs = SocksSession.wsDomainPrefs.prefs(dc)
         var ordered = prefs + domains.filter { !prefs.contains($0) }
@@ -389,12 +398,14 @@ public final class SocksSession: NSObject, @unchecked Sendable {
         // сессий TG) может не принять первый connect, второй проходит.
         // Если первый круг завершился только глухими таймаутами (релей вообще
         // недоступен), второй круг бесполезен — экономим 6с на подключении.
+        // Таймаут 3с: TG-клиент закрывает сессию быстрее, чем 6с ожидания.
         for attempt in 1...2 {
             var sawHardTimeout = false
+            let timeout: TimeInterval = 3.0
             for domain in ordered {
                 CoreLog.write("ws-connect(\(attempt)): try dc\(dc) ip=\(targetIp) domain=\(domain)")
                 do {
-                    let ws = try WSClient(ip: targetIp, domain: domain, timeout: 6.0)
+                    let ws = try WSClient(ip: targetIp, domain: domain, timeout: timeout)
                     CoreLog.write("ws-connect: OK dc\(dc) via \(domain)")
                     SocksSession.wsDomainPrefs.update(dc, ordered, successDomain: domain)
                     return ws
@@ -415,6 +426,12 @@ public final class SocksSession: NSObject, @unchecked Sendable {
                 }
             }
             if sawHardTimeout { break }
+        }
+        // Коулдаун ТОЛЬКО для DC без WS-релея (1/3/5 — сеть их блокирует).
+        // Рабочие DC2/4 не коулдауним: временный отказ релея на пике должен
+        // лечиться пулом и повторной попыткой, а не 30с простоя без WS.
+        if dc == 1 || dc == 3 || dc == 5 {
+            WsPool.shared.markCooldown(key)
         }
         return nil
     }
