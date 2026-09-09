@@ -221,7 +221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusWindow.makeKeyAndOrderFront(nil)
             return
         }
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 230),
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
                            styleMask: [.titled, .closable],
                            backing: .buffered, defer: false)
         win.title = "TG WS Proxy — Настройки"
@@ -232,32 +232,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         win.contentView = content
 
         let portLbl = NSTextField(labelWithString: "Локальный порт SOCKS5:")
-        portLbl.frame = NSRect(x: 20, y: 170, width: 340, height: 18)
+        portLbl.frame = NSRect(x: 20, y: 196, width: 340, height: 18)
         content.addSubview(portLbl)
 
-        let portField = NSTextField(frame: NSRect(x: 20, y: 140, width: 380, height: 24))
+        let portField = NSTextField(frame: NSRect(x: 20, y: 164, width: 380, height: 24))
         portField.stringValue = String(config.port)
         portField.placeholderString = "1080"
         content.addSubview(portField)
 
         let autoLbl = NSTextField(labelWithString: "Включать при запуске приложения")
-        autoLbl.frame = NSRect(x: 20, y: 110, width: 340, height: 18)
+        autoLbl.frame = NSRect(x: 20, y: 132, width: 340, height: 18)
         content.addSubview(autoLbl)
 
         let autoCheck = NSButton(checkboxWithTitle: "Автозапуск прокси", target: nil, action: nil)
-        autoCheck.frame = NSRect(x: 20, y: 80, width: 380, height: 24)
+        autoCheck.frame = NSRect(x: 20, y: 100, width: 380, height: 24)
         autoCheck.state = config.autoStart ? .on : .off
         content.addSubview(autoCheck)
 
         let hint = NSTextField(wrappingLabelWithString:
             "Настройка Telegram: Настройки → Данные и память → Прокси → SOCKS5.\nСервер: 127.0.0.1, порт: \(config.port), без логина и пароля.")
-        hint.frame = NSRect(x: 20, y: 28, width: 380, height: 46)
+        hint.frame = NSRect(x: 20, y: 52, width: 380, height: 42)
         hint.textColor = .secondaryLabelColor
         hint.font = NSFont.systemFont(ofSize: 11)
         content.addSubview(hint)
 
         let saveBtn = NSButton(title: "Сохранить", target: self, action: nil)
-        saveBtn.frame = NSRect(x: 315, y: -12, width: 85, height: 30)
+        saveBtn.frame = NSRect(x: 310, y: 12, width: 90, height: 30)
         saveBtn.bezelStyle = .rounded
         saveBtn.target = self
         saveBtn.action = #selector(saveSettings(_:))
@@ -265,7 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         content.addSubview(saveBtn)
 
         let cancelBtn = NSButton(title: "Отмена", target: nil, action: nil)
-        cancelBtn.frame = NSRect(x: 225, y: -12, width: 85, height: 30)
+        cancelBtn.frame = NSRect(x: 215, y: 12, width: 90, height: 30)
         cancelBtn.bezelStyle = .rounded
         content.addSubview(cancelBtn)
 

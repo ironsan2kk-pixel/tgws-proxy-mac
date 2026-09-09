@@ -4,18 +4,21 @@ import Darwin
 // MARK: - Файловый лог ядра (диагностика; пишется в ~/Library/Application Support/TGWSProxyMac/core.log)
 
 enum CoreLog {
+    private static let queue = DispatchQueue(label: "corelog")
     static func write(_ s: String) {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let d = dir.appendingPathComponent("TGWSProxyMac", isDirectory: true)
-        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
-        let p = d.appendingPathComponent("core.log")
-        let line = "[\(Date().formatted(date: .abbreviated, time: .standard))] \(s)\n"
-        if let h = try? FileHandle(forWritingTo: p) {
-            h.seekToEndOfFile()
-            h.write(Data(line.utf8))
-            try? h.close()
-        } else {
-            try? line.data(using: .utf8)?.write(to: p)
+        queue.async {
+            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            let d = dir.appendingPathComponent("TGWSProxyMac", isDirectory: true)
+            try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+            let p = d.appendingPathComponent("core.log")
+            let line = "[\(Date().formatted(date: .abbreviated, time: .standard))] \(s)\n"
+            if let h = try? FileHandle(forWritingTo: p) {
+                h.seekToEndOfFile()
+                h.write(Data(line.utf8))
+                try? h.close()
+            } else {
+                try? line.data(using: .utf8)?.write(to: p)
+            }
         }
     }
 }
@@ -175,39 +178,44 @@ public final class SocksSession: NSObject, @unchecked Sendable {
 
     private func readSome(maxN: Int = 65536) -> [UInt8]? {
         var buf = [UInt8](repeating: 0, count: maxN)
-        let r = read(fd, &buf, maxN)
-        if r == 0 { return nil }
-        if r < 0 {
-            if errno == EINTR { return readSome(maxN: maxN) }
-            if errno == EAGAIN || errno == EWOULDBLOCK {
-                // Здесь это SO_RCVTIMEO (нет данных 20с) либо nonblock — это не смерть сокета:
-                // TG шлёт пинги каждые ~30-60с. Ждём данные дальше, не рвём сессию.
-                usleep(100_000)
-                return readSome(maxN: maxN)
+        while true {
+            let r = read(fd, &buf, maxN)
+            if r == 0 { return nil }
+            if r < 0 {
+                if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    // SO_RCVTIMEO (нет данных 20с) либо nonblock — не смерть сокета:
+                    // TG шлёт пинги каждые ~30-60с. Ждём дальше, не рвём сессию.
+                    usleep(100_000)
+                    continue
+                }
+                CoreLog.write("readSome: errno=\(errno) (\(String(cString: strerror(errno))))")
+                return nil
             }
-            CoreLog.write("readSome: errno=\(errno) (\(String(cString: strerror(errno))))")
-            return nil
+            return Array(buf[0..<r])
         }
-        return Array(buf[0..<r])
     }
 
     @discardableResult
     private func writeAll(_ data: [UInt8]) -> Bool {
-        var i = 0
-        while i < data.count {
-            let r = write(fd, Array(data[i...]), data.count - i)
-            if r < 0 {
-                if errno == EINTR { continue }
-                if errno == EAGAIN || errno == EWOULDBLOCK {
-                    usleep(20_000)
-                    continue
+        data.withUnsafeBufferPointer { bp in
+            var i = 0
+            let base = bp.baseAddress!
+            while i < data.count {
+                let r = write(fd, base + i, data.count - i)
+                if r < 0 {
+                    if errno == EINTR { continue }
+                    if errno == EAGAIN || errno == EWOULDBLOCK {
+                        usleep(20_000)
+                        continue
+                    }
+                    return false
                 }
-                return false
+                if r == 0 { return false }
+                i += r
             }
-            if r == 0 { return false }
-            i += r
+            return true
         }
-        return true
     }
 
     private var isClosedNow: Bool {
